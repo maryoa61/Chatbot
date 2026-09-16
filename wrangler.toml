@@ -1,0 +1,15 @@
+# Chatbot Telegram proxy worker.
+# The real worker name is passed by CI (--name flag); the value below
+# is only a default for local `wrangler dev`.
+name = "chatbot-telegram-proxy"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+[vars]
+# Comma-separated list of allowed browser Origins, e.g.
+# "https://my-chatbot.pages.dev". Overridden in CI with --var.
+# Empty = browser calls denied (server-to-server still works).
+ALLOWED_ORIGINS = ""
+
+# PROXY_TOKEN is a secret, never written here:
+#   wrangler secret put PROXY_TOKEN
