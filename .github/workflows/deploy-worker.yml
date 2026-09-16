@@ -23,6 +23,10 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: >-
-            deploy --name chatbot-telegram-proxy
-            --var ALLOWED_ORIGINS:${{ secrets.ALLOWED_ORIGINS }}
+          # NOTE: ALLOWED_ORIGINS is intentionally not passed here until the
+          # site URL is known. wrangler.toml defaults it to "" (browser
+          # calls denied, server-to-server works). Set it later in
+          # Cloudflare dashboard → Worker → Settings → Variables, or add
+          # an ALLOWED_ORIGINS repo secret and re-add:
+          #   --var ALLOWED_ORIGINS:${{ secrets.ALLOWED_ORIGINS }}
+          command: deploy --name chatbot-telegram-proxy
