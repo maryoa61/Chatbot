@@ -1,0 +1,7 @@
+{
+  "name": "تلگرام چت‌بات هوش مصنوعی | AI Agent Messenger",
+  "description": "چت‌بات وب تلگرام با قابلیت اتصال به ربات واقعی تلگرام، سیستم تم پیشرفته (تاریک، روشن، Midnight، Desert) و پشتیبانی جامع از تمامی APIهای هوش مصنوعی خانواده OpenAI و Anthropic (دیپ‌سیک، گروک، اوپن‌روتر، میسترال، اولاما و Claude 3.7)",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
