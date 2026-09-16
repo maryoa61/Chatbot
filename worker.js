@@ -1,5 +1,5 @@
 /* ============================================================
-   Chatbot — Cloudflare Worker (Telegram reverse proxy)
+   Chatbot — Cloudflare Worker (Telegram reverse proxy) v1.0
    ------------------------------------------------------------
    Forwards path-preserving requests to api.telegram.org:
 
