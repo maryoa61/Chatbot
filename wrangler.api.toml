@@ -5,3 +5,8 @@
 name = "chatbot-api"
 main = "api.js"
 compatibility_date = "2024-01-01"
+
+# Persistent state for Telegram routes (config, logs, update cursor).
+[[kv_namespaces]]
+binding = "CHATBOT_STATE"
+id = "a9822e85484e4ce287da7eeb4ae9f094"
