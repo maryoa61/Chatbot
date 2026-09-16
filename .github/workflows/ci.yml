@@ -30,12 +30,13 @@ jobs:
       - name: Verify dist output
         run: ls -la dist/
 
-      - name: Deploy to Cloudflare Pages
+      - name: Install Wrangler
         if: github.event_name == 'push'
-        uses: cloudflare/pages-action@v1
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          projectName: chatbot
-          directory: dist
-          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
+        run: npm install -g wrangler
+
+      - name: Deploy API + frontend (single Worker)
+        if: github.event_name == 'push'
+        run: wrangler deploy --config wrangler.api.toml
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
