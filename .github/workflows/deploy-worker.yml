@@ -18,15 +18,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Deploy Worker (Telegram proxy)
-        uses: cloudflare/wrangler-action@v3
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          # NOTE: ALLOWED_ORIGINS is intentionally not passed here until the
-          # site URL is known. wrangler.toml defaults it to "" (browser
-          # calls denied, server-to-server works). Set it later in
-          # Cloudflare dashboard → Worker → Settings → Variables, or add
-          # an ALLOWED_ORIGINS repo secret and re-add:
-          #   --var ALLOWED_ORIGINS:${{ secrets.ALLOWED_ORIGINS }}
-          command: deploy --name chatbot-telegram-proxy
+          node-version: 22
+
+      - name: Install Wrangler
+        run: npm install -g wrangler
+
+      - name: Deploy Worker (Telegram proxy)
+        # NOTE: ALLOWED_ORIGINS is intentionally not passed until the site
+        # URL is known. wrangler.toml defaults it to "" (browser calls
+        # denied, server-to-server works). Set it later in Cloudflare
+        # dashboard → Worker → Settings → Variables.
+        run: wrangler deploy --name chatbot-telegram-proxy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
