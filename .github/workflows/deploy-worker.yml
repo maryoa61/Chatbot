@@ -5,7 +5,9 @@ on:
     branches: [main]
     paths:
       - worker.js
+      - api.js
       - wrangler.toml
+      - wrangler.api.toml
       - .github/workflows/deploy-worker.yml
   workflow_dispatch:
 
@@ -32,6 +34,12 @@ jobs:
         # denied, server-to-server works). Set it later in Cloudflare
         # dashboard → Worker → Settings → Variables.
         run: wrangler deploy --name chatbot-telegram-proxy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Deploy Worker (API backend, phase 1)
+        run: wrangler deploy --config wrangler.api.toml
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

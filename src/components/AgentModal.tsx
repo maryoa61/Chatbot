@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { AIAgent, ProviderType, isOpenAIFamily, isAnthropicFamily } from '../types';
 import { ServerKeyStatus } from '../services/apiService';
+import { apiUrl } from '../utils/api';
 import {
   X,
   Key,
@@ -359,7 +360,7 @@ export const AgentModal: React.FC<AgentModalProps> = ({
 
     try {
       if (provider === 'gemini') {
-        const res = await fetch('/api/proxy/gemini', {
+        const res = await fetch(apiUrl('/api/proxy/gemini'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -376,7 +377,7 @@ export const AgentModal: React.FC<AgentModalProps> = ({
           setTestResult({ success: false, message: data.error || 'خطا در احراز هویت Google Gemini' });
         }
       } else if (isAnthropicFamily(provider)) {
-        const res = await fetch('/api/proxy/anthropic', {
+        const res = await fetch(apiUrl('/api/proxy/anthropic'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -395,7 +396,7 @@ export const AgentModal: React.FC<AgentModalProps> = ({
         }
       } else {
         // OpenAI and all compatible providers (DeepSeek, Groq, OpenRouter, xAI, Mistral, Ollama)
-        const res = await fetch('/api/proxy/openai', {
+        const res = await fetch(apiUrl('/api/proxy/openai'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

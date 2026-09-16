@@ -9,6 +9,7 @@ import {
   isAnthropicFamily,
   isOpenAIFamily,
 } from '../types';
+import { apiUrl } from '../utils/api';
 
 export interface SendMessageOptions {
   agent: AIAgent;
@@ -137,7 +138,7 @@ export async function fetchWithRetry(
  */
 export async function searchWeb(query: string): Promise<WebSource[]> {
   try {
-    const res = await fetch('/api/search', {
+    const res = await fetch(apiUrl('/api/search'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query }),
@@ -287,7 +288,7 @@ async function callGemini(params: {
   }
   contents.push({ role: 'user', parts: userParts });
 
-  const res = await fetch('/api/proxy/gemini', {
+  const res = await fetch(apiUrl('/api/proxy/gemini'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -366,7 +367,7 @@ async function callOpenAI(params: {
 
   const shouldUseStream = Boolean(onStreamChunk);
 
-  const res = await fetchWithRetry('/api/proxy/openai', {
+  const res = await fetchWithRetry(apiUrl('/api/proxy/openai'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -505,7 +506,7 @@ async function callAnthropic(params: {
 
   const shouldUseStream = Boolean(onStreamChunk);
 
-  const res = await fetchWithRetry('/api/proxy/anthropic', {
+  const res = await fetchWithRetry(apiUrl('/api/proxy/anthropic'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -605,7 +606,7 @@ export interface ServerKeyStatus {
 
 export async function getServerKeyStatus(): Promise<ServerKeyStatus> {
   try {
-    const res = await fetch('/api/config/status');
+    const res = await fetch(apiUrl('/api/config/status'));
     if (res.ok) {
       return await res.json();
     }
