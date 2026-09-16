@@ -851,7 +851,7 @@ export async function testTelegramBotToken(
   message?: string;
 }> {
   try {
-    const res = await fetch('/api/telegram/test', {
+    const res = await fetch(apiUrl('/api/telegram/test'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ botToken, customApiUrl }),
@@ -869,7 +869,7 @@ export async function sendTelegramMessage(
   customApiUrl?: string
 ): Promise<{ ok: boolean; result?: any; error?: string }> {
   try {
-    const res = await fetch('/api/telegram/send', {
+    const res = await fetch(apiUrl('/api/telegram/send'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ botToken, chatId, text, customApiUrl }),
@@ -893,7 +893,7 @@ export async function pollTelegramUpdates(
   error?: string;
 }> {
   try {
-    const res = await fetch('/api/telegram/poll', {
+    const res = await fetch(apiUrl('/api/telegram/poll'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ botToken, autoReply, systemPrompt, customApiUrl }),
@@ -906,7 +906,7 @@ export async function pollTelegramUpdates(
 
 export async function syncTelegramConfigToServer(config: Partial<TelegramBotConfig>): Promise<void> {
   try {
-    await fetch('/api/telegram/config', {
+    await fetch(apiUrl('/api/telegram/config'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(config),
@@ -920,7 +920,7 @@ export const updateTelegramConfig = syncTelegramConfigToServer;
 
 export async function getTelegramLogs(): Promise<any[]> {
   try {
-    const res = await fetch('/api/telegram/logs');
+    const res = await fetch(apiUrl('/api/telegram/logs'));
     const data = await res.json();
     return data.logs || [];
   } catch {
@@ -930,7 +930,7 @@ export async function getTelegramLogs(): Promise<any[]> {
 
 export async function clearTelegramLogs(): Promise<boolean> {
   try {
-    const res = await fetch('/api/telegram/logs/clear', { method: 'POST' });
+    const res = await fetch(apiUrl('/api/telegram/logs/clear'), { method: 'POST' });
     const data = await res.json();
     return Boolean(data.ok);
   } catch {
