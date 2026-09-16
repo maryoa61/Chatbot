@@ -26,16 +26,3 @@ jobs:
           command: >-
             deploy --name chatbot-telegram-proxy
             --var ALLOWED_ORIGINS:${{ secrets.ALLOWED_ORIGINS }}
-
-      # Optional: only runs when PROXY_TOKEN secret exists.
-      - name: Sync Worker secret (PROXY_TOKEN)
-        if: ${{ secrets.PROXY_TOKEN != '' }}
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: secret put PROXY_TOKEN --name chatbot-telegram-proxy
-          secrets: |
-            PROXY_TOKEN
-        env:
-          PROXY_TOKEN: ${{ secrets.PROXY_TOKEN }}
