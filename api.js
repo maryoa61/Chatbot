@@ -1,9 +1,10 @@
 /* ============================================================
-   Chatbot — Cloudflare Worker (API backend) v2.0
+   Chatbot — Cloudflare Worker (API backend) v2.1
    ------------------------------------------------------------
    Phase 1: stateless routes (health, search, proxy)
    Phase 2: Telegram routes (KV-backed)
-   Phase 3: Combo / Provider / Key Store + AI Adapter (NEW)
+   Phase 3: Combo / Provider / Key Store + AI Adapter
+   Phase 4: Vision Adapter + sub-pools (vision/audio) + auto-routing
 
    Secrets:
      GEMINI_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY,
@@ -240,7 +241,7 @@ function isKeyUsable(k) {
 }
 
 /* ============================================================
-   COMBO STORE
+   COMBO STORE  (main / vision / audio sub-pools)
    ============================================================ */
 
 const STRATEGIES = ['fallback', 'round-robin', 'fusion'];
@@ -259,19 +260,45 @@ async function comboGet(env, id) {
   return kvGet(env, `combo:${id}`);
 }
 
+/* --- normalize a sub-pool (vision / audio) --- */
+function normalizeSubPool(raw, fallback = {}) {
+  const src = raw || {};
+  const fb  = fallback || {};
+  const strategy = src.strategy || fb.strategy || 'fallback';
+  if (!STRATEGIES.includes(strategy)) {
+    throw new Error(`Unsupported sub-pool strategy: ${strategy}`);
+  }
+  return {
+    enabled:  src.enabled  ?? fb.enabled  ?? false,
+    strategy,
+    models:   Array.isArray(src.models) ? src.models
+            : Array.isArray(fb.models) ? fb.models
+            : [],
+  };
+}
+
 async function comboSave(env, data) {
   const id = data.id || uid('combo');
   const existing = (await kvGet(env, `combo:${id}`)) || {};
+
   const strategy = data.strategy || existing.strategy || 'fallback';
   if (!STRATEGIES.includes(strategy)) {
     throw new Error(`Unsupported strategy: ${strategy}`);
   }
+
   const next = {
     ...existing,
     ...data,
     id,
     strategy,
-    models: data.models || existing.models || [],
+    models: Array.isArray(data.models)   ? data.models
+          : Array.isArray(existing.models) ? existing.models
+          : [],
+
+    // NEW: sub-pools
+    vision: normalizeSubPool(data.vision, existing.vision),
+    audio:  normalizeSubPool(data.audio,  existing.audio),
+
     endpoint: {
       requireKey: true,
       keyIds: [],
@@ -281,6 +308,7 @@ async function comboSave(env, data) {
     createdAt: existing.createdAt || now(),
     updatedAt: now(),
   };
+
   await kvPut(env, `combo:${id}`, next);
   await kvListPush(env, 'combo:index', id);
   return next;
@@ -296,6 +324,8 @@ async function comboDelete(env, id) {
   }
   await kvDel(env, `combo:${id}`);
   await kvDel(env, `combo:${id}:cursor`);
+  await kvDel(env, `combo:${id}:vision:cursor`);
+  await kvDel(env, `combo:${id}:audio:cursor`);
   await kvListRemove(env, 'combo:index', id);
 }
 
@@ -398,8 +428,8 @@ async function epKeyListForCombo(env, comboId) {
    INTERNAL MESSAGE FORMAT
    ------------------------------------------------------------
    {
-     messages: [{ role: "system"|"user"|"assistant", content: string | parts[] }],
-     model?: string, temperature?, max_tokens?, stream?, tools?
+     messages: [{ role, content }],
+     model?, temperature?, max_tokens?, stream?, tools?
    }
    ============================================================ */
 
@@ -415,11 +445,70 @@ function normalizeIncomingOpenAI(body) {
 }
 
 /* ============================================================
+   VISION / INPUT DETECTION
+   ============================================================ */
+
+function parseDataUrl(url) {
+  const m = String(url || '').match(/^data:([^;]+);base64,(.+)$/);
+  if (!m) return null;
+  return { mimeType: m[1], data: m[2] };
+}
+
+/**
+ * Detects the input type of a request.
+ * Returns 'vision' | 'audio' | 'main'.
+ */
+function detectInputType(messages) {
+  for (const m of messages || []) {
+    if (!Array.isArray(m.content)) continue;
+    for (const part of m.content) {
+      if (!part || typeof part !== 'object') continue;
+      if (part.type === 'image_url' || part.type === 'image' || part.inline_data || part.file_data) {
+        return 'vision';
+      }
+      if (part.type === 'input_audio' || part.type === 'audio') {
+        return 'audio';
+      }
+    }
+  }
+  return 'main';
+}
+
+/**
+ * Picks the right pool from a combo based on input type.
+ * Falls back to main pool if the requested pool is disabled or empty.
+ */
+function pickPoolForInputType(combo, inputType) {
+  if (inputType === 'vision' && combo.vision?.enabled && (combo.vision.models?.length || 0) > 0) {
+    return {
+      id: `${combo.id}:vision`,
+      strategy: combo.vision.strategy || 'fallback',
+      models: combo.vision.models,
+      judgeModel: combo.judgeModel,
+    };
+  }
+  if (inputType === 'audio' && combo.audio?.enabled && (combo.audio.models?.length || 0) > 0) {
+    return {
+      id: `${combo.id}:audio`,
+      strategy: combo.audio.strategy || 'fallback',
+      models: combo.audio.models,
+      judgeModel: combo.judgeModel,
+    };
+  }
+  return {
+    id: combo.id,
+    strategy: combo.strategy || 'fallback',
+    models: combo.models || [],
+    judgeModel: combo.judgeModel,
+  };
+}
+
+/* ============================================================
    ADAPTERS
    ============================================================ */
 
-/* --- OpenAI-compatible (covers openai, openrouter, deepseek, groq, xai,
-       mistral, together, and any custom baseUrl) --- */
+/* --- OpenAI-compatible (openai, openrouter, deepseek, groq, xai,
+       mistral, together, any custom baseUrl) --- */
 
 async function callOpenAICompatible({ baseUrl, apiKey, model, req }) {
   let url = trim(baseUrl || 'https://api.openai.com/v1').replace(/\/+$/, '');
@@ -471,11 +560,37 @@ async function callOpenAICompatible({ baseUrl, apiKey, model, req }) {
 
 /* --- Anthropic --- */
 
+/**
+ * Convert OpenAI-style content (string | array of parts) to Anthropic blocks.
+ */
+function anthropicContentFromOpenAI(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return String(content || '');
+  return content.map((c) => {
+    if (typeof c === 'string') return { type: 'text', text: c };
+    if (c.type === 'text') return { type: 'text', text: c.text || '' };
+    if (c.type === 'image_url') {
+      const url = (c.image_url && (c.image_url.url || c.image_url)) || '';
+      const parsed = parseDataUrl(url);
+      if (parsed) {
+        return {
+          type: 'image',
+          source: { type: 'base64', media_type: parsed.mimeType, data: parsed.data },
+        };
+      }
+      return { type: 'image', source: { type: 'url', url } };
+    }
+    // already Anthropic native
+    if (c.type === 'image' && c.source) return c;
+    return { type: 'text', text: '' };
+  });
+}
+
 async function callAnthropic({ baseUrl, apiKey, model, req }) {
   let url = trim(baseUrl || 'https://api.anthropic.com').replace(/\/+$/, '');
   if (!url.endsWith('/v1/messages')) url += '/v1/messages';
 
-  // جدا کردن system از messages
+  // Split system from messages
   let system = '';
   const msgs = [];
   for (const m of req.messages || []) {
@@ -484,7 +599,7 @@ async function callAnthropic({ baseUrl, apiKey, model, req }) {
     } else {
       msgs.push({
         role: m.role === 'assistant' ? 'assistant' : 'user',
-        content: m.content,
+        content: anthropicContentFromOpenAI(m.content),
       });
     }
   }
@@ -525,16 +640,39 @@ async function callAnthropic({ baseUrl, apiKey, model, req }) {
 
 /* --- Gemini --- */
 
+/**
+ * Convert OpenAI-style content into Gemini parts.
+ * Handles text, image_url (data URLs), and native Gemini parts.
+ */
 function geminiContentsFromMessages(messages) {
   const contents = [];
   for (const m of messages || []) {
     if (m.role === 'system') continue;
     const role = m.role === 'assistant' ? 'model' : 'user';
-    const parts = typeof m.content === 'string'
-      ? [{ text: m.content }]
-      : Array.isArray(m.content)
-        ? m.content.map((c) => (typeof c === 'string' ? { text: c } : c))
-        : [{ text: String(m.content) }];
+
+    let parts;
+    if (typeof m.content === 'string') {
+      parts = [{ text: m.content }];
+    } else if (Array.isArray(m.content)) {
+      parts = m.content.map((c) => {
+        if (typeof c === 'string') return { text: c };
+        if (c.type === 'text') return { text: c.text || '' };
+        if (c.type === 'image_url') {
+          const url = (c.image_url && (c.image_url.url || c.image_url)) || '';
+          const parsed = parseDataUrl(url);
+          if (parsed) {
+            return { inline_data: { mime_type: parsed.mimeType, data: parsed.data } };
+          }
+          return { text: `[image at ${url}]` };
+        }
+        // native gemini
+        if (c.inline_data || c.file_data) return c;
+        return { text: '' };
+      });
+    } else {
+      parts = [{ text: String(m.content || '') }];
+    }
+
     contents.push({ role, parts });
   }
   return contents;
@@ -547,11 +685,18 @@ async function callGemini({ baseUrl, apiKey, model, req }) {
   const contents = geminiContentsFromMessages(req.messages);
   const body = { contents };
 
-  const sys = (req.messages || []).filter((m) => m.role === 'system').map((m) => typeof m.content === 'string' ? m.content : '').join('\n').trim();
+  const sys = (req.messages || [])
+    .filter((m) => m.role === 'system')
+    .map((m) => (typeof m.content === 'string' ? m.content : ''))
+    .join('\n').trim();
   if (sys) body.systemInstruction = { parts: [{ text: sys }] };
 
-  if (req.temperature != null) body.generationConfig = { ...(body.generationConfig || {}), temperature: Number(req.temperature) };
-  if (req.max_tokens) body.generationConfig = { ...(body.generationConfig || {}), maxOutputTokens: Number(req.max_tokens) };
+  if (req.temperature != null) {
+    body.generationConfig = { ...(body.generationConfig || {}), temperature: Number(req.temperature) };
+  }
+  if (req.max_tokens) {
+    body.generationConfig = { ...(body.generationConfig || {}), maxOutputTokens: Number(req.max_tokens) };
+  }
 
   const method = req.stream ? 'streamGenerateContent' : 'generateContent';
   const url = `${base}/v1beta/models/${modelToUse}:${method}?key=${encodeURIComponent(apiKey)}${req.stream ? '&alt=sse' : ''}`;
@@ -585,21 +730,17 @@ async function callProvider({ provider, apiKey, model, req }) {
   if (type === 'gemini') {
     return callGemini({ baseUrl: provider.baseUrl, apiKey, model, req });
   }
-  // همهی بقیه (openai, openrouter, deepseek, groq, xai, mistral, together, openai-compatible)
   return callOpenAICompatible({ baseUrl: provider.baseUrl, apiKey, model, req });
 }
 
 /* ============================================================
-   RESPONSE CONVERTERS (به فرمت OpenAI)
+   RESPONSE CONVERTERS (to OpenAI shape)
    ============================================================ */
 
 async function convertNonStreamToOpenAI({ upstream, kind, model }) {
   const raw = await upstream.json();
 
-  if (kind === 'openai') {
-    // already OpenAI shape
-    return raw;
-  }
+  if (kind === 'openai') return raw;
 
   if (kind === 'anthropic') {
     const text = (raw.content || []).map((c) => c.text || '').join('');
@@ -608,20 +749,16 @@ async function convertNonStreamToOpenAI({ upstream, kind, model }) {
       object: 'chat.completion',
       created: Math.floor(now() / 1000),
       model: raw.model || model,
-      choices: [
-        {
-          index: 0,
-          message: { role: 'assistant', content: text },
-          finish_reason: raw.stop_reason || 'stop',
-        },
-      ],
-      usage: raw.usage
-        ? {
-            prompt_tokens: raw.usage.input_tokens || 0,
-            completion_tokens: raw.usage.output_tokens || 0,
-            total_tokens: (raw.usage.input_tokens || 0) + (raw.usage.output_tokens || 0),
-          }
-        : undefined,
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: text },
+        finish_reason: raw.stop_reason || 'stop',
+      }],
+      usage: raw.usage ? {
+        prompt_tokens: raw.usage.input_tokens || 0,
+        completion_tokens: raw.usage.output_tokens || 0,
+        total_tokens: (raw.usage.input_tokens || 0) + (raw.usage.output_tokens || 0),
+      } : undefined,
     };
   }
 
@@ -633,27 +770,23 @@ async function convertNonStreamToOpenAI({ upstream, kind, model }) {
       object: 'chat.completion',
       created: Math.floor(now() / 1000),
       model,
-      choices: [
-        {
-          index: 0,
-          message: { role: 'assistant', content: text },
-          finish_reason: cand?.finishReason || 'stop',
-        },
-      ],
-      usage: raw.usageMetadata
-        ? {
-            prompt_tokens: raw.usageMetadata.promptTokenCount || 0,
-            completion_tokens: raw.usageMetadata.candidatesTokenCount || 0,
-            total_tokens: raw.usageMetadata.totalTokenCount || 0,
-          }
-        : undefined,
+      choices: [{
+        index: 0,
+        message: { role: 'assistant', content: text },
+        finish_reason: cand?.finishReason || 'stop',
+      }],
+      usage: raw.usageMetadata ? {
+        prompt_tokens: raw.usageMetadata.promptTokenCount || 0,
+        completion_tokens: raw.usageMetadata.candidatesTokenCount || 0,
+        total_tokens: raw.usageMetadata.totalTokenCount || 0,
+      } : undefined,
     };
   }
 
   return raw;
 }
 
-/* --- Streaming: تبدیل SSE هر پرووایدر به فرمت OpenAI --- */
+/* --- Streaming: SSE transformation per provider --- */
 
 function sseTransform(upstream, kind, model) {
   const { readable, writable } = new TransformStream();
@@ -664,7 +797,7 @@ function sseTransform(upstream, kind, model) {
   const id = uid('chatcmpl');
   const created = Math.floor(now() / 1000);
 
-  const sendChunk = (delta, finish = null) => {
+  const sendChunk = async (delta, finish = null) => {
     const chunk = {
       id,
       object: 'chat.completion.chunk',
@@ -672,7 +805,9 @@ function sseTransform(upstream, kind, model) {
       model,
       choices: [{ index: 0, delta, finish_reason: finish }],
     };
-    writer.write(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+    try {
+      await writer.write(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+    } catch { /* client disconnected */ }
   };
 
   (async () => {
@@ -696,18 +831,18 @@ function sseTransform(upstream, kind, model) {
           if (kind === 'openai') {
             const delta = parsed.choices?.[0]?.delta;
             const finish = parsed.choices?.[0]?.finish_reason || null;
-            if (delta || finish) sendChunk(delta || {}, finish);
+            if (delta || finish) await sendChunk(delta || {}, finish);
           } else if (kind === 'anthropic') {
             if (parsed.type === 'content_block_delta' && parsed.delta?.text) {
-              sendChunk({ content: parsed.delta.text });
+              await sendChunk({ content: parsed.delta.text });
             } else if (parsed.type === 'message_stop') {
-              sendChunk({}, 'stop');
+              await sendChunk({}, 'stop');
             }
           } else if (kind === 'gemini') {
             const t = (parsed.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
-            if (t) sendChunk({ content: t });
+            if (t) await sendChunk({ content: t });
             const fr = parsed.candidates?.[0]?.finishReason;
-            if (fr) sendChunk({}, fr.toLowerCase());
+            if (fr) await sendChunk({}, fr.toLowerCase());
           }
         }
       }
@@ -724,12 +859,43 @@ function sseTransform(upstream, kind, model) {
   return readable;
 }
 
+/**
+ * Wrap a non-stream JSON chat.completion into a proper SSE stream.
+ * Used by fusion when the client requested streaming.
+ */
+function jsonToSse(completion) {
+  const id = completion.id || uid('chatcmpl');
+  const created = completion.created || Math.floor(now() / 1000);
+  const model = completion.model || 'combo';
+  const text = completion.choices?.[0]?.message?.content || '';
+  const finish = completion.choices?.[0]?.finish_reason || 'stop';
+
+  const chunk1 = {
+    id, object: 'chat.completion.chunk', created, model,
+    choices: [{ index: 0, delta: { role: 'assistant', content: text }, finish_reason: null }],
+  };
+  const chunk2 = {
+    id, object: 'chat.completion.chunk', created, model,
+    choices: [{ index: 0, delta: {}, finish_reason: finish }],
+  };
+
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk1)}\n\n`));
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk2)}\n\n`));
+      controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+      controller.close();
+    },
+  });
+  return stream;
+}
+
 /* ============================================================
    COMBO RUNNER
    ============================================================ */
 
 async function resolveKeyForModel(env, model, cursor) {
-  // model: { providerId, modelName, keyIds? }
   const provider = await providerGet(env, model.providerId);
   if (!provider) throw new Error(`Provider not found: ${model.providerId}`);
 
@@ -739,7 +905,6 @@ async function resolveKeyForModel(env, model, cursor) {
     keys = keys.filter((k) => model.keyIds.includes(k.id));
   }
   if (keys.length === 0) {
-    // اگه provider اصلاً key نداره، شاید بخوایم از env استفاده کنیم
     return { provider, key: null };
   }
   const pick = keys[cursor % keys.length];
@@ -750,12 +915,12 @@ async function runCombo(env, combo, req) {
   const strategy = combo.strategy || 'fallback';
   const models = combo.models || [];
   if (models.length === 0) {
-    throw new Error('Combo has no models');
+    throw new Error('Combo has no models in this pool');
   }
 
-  if (strategy === 'fallback') return runFallback(env, combo, req, models);
+  if (strategy === 'fallback')    return runFallback(env, combo, req, models);
   if (strategy === 'round-robin') return runRoundRobin(env, combo, req, models);
-  if (strategy === 'fusion') return runFusion(env, combo, req, models);
+  if (strategy === 'fusion')      return runFusion(env, combo, req, models);
   throw new Error(`Unknown strategy: ${strategy}`);
 }
 
@@ -763,8 +928,10 @@ async function runFallback(env, combo, req, models) {
   let lastErr = null;
   for (let i = 0; i < models.length; i++) {
     const m = models[i];
+    let usedKey = null;
     try {
       const { provider, key } = await resolveKeyForModel(env, m, 0);
+      usedKey = key;
       const apiKey = key?.apiKey || keyFromEnvForProvider(env, provider);
       const result = await callProvider({
         provider,
@@ -776,15 +943,11 @@ async function runFallback(env, combo, req, models) {
       return { result, provider, key, model: m.modelName };
     } catch (e) {
       lastErr = e;
-      // mark key cooldown
-      try {
-        const { key } = await resolveKeyForModel(env, m, 0);
-        if (key?.id) {
-          const cd = e.status === 429 ? 10 * 60_000 : 60_000;
-          await keyMarkFail(env, key.id, cd);
-        }
-      } catch {}
-      // ادامه به مدل بعدی
+      if (usedKey?.id) {
+        const cd = e.status === 429 ? 10 * 60_000 : 60_000;
+        try { await keyMarkFail(env, usedKey.id, cd); } catch {}
+      }
+      // try next model
     }
   }
   throw lastErr || new Error('All models failed');
@@ -800,7 +963,6 @@ async function runRoundRobin(env, combo, req, models) {
 }
 
 async function runFusion(env, combo, req, models) {
-  // مدل داور
   const judgeModelId = combo.judgeModel;
   const panel = models.filter((m) => !judgeModelId || JSON.stringify(m) !== JSON.stringify(judgeModelId));
 
@@ -821,28 +983,22 @@ async function runFusion(env, combo, req, models) {
     .filter((c) => c.text);
 
   if (candidates.length === 0) throw new Error('Fusion: all panel models failed');
+
+  const wrap = (text, model) => ({
+    upstream: new Response(JSON.stringify({
+      id: uid('chatcmpl'),
+      object: 'chat.completion',
+      created: Math.floor(now() / 1000),
+      model,
+      choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }],
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    kind: 'openai',
+  });
+
   if (candidates.length === 1) {
-    return {
-      result: {
-        upstream: new Response(
-          JSON.stringify({
-            id: uid('chatcmpl'),
-            object: 'chat.completion',
-            created: Math.floor(now() / 1000),
-            model: candidates[0].model,
-            choices: [{ index: 0, message: { role: 'assistant', content: candidates[0].text }, finish_reason: 'stop' }],
-          }),
-          { status: 200, headers: { 'Content-Type': 'application/json' } }
-        ),
-        kind: 'openai',
-      },
-      provider: null,
-      key: null,
-      model: candidates[0].model,
-    };
+    return { result: wrap(candidates[0].text, candidates[0].model), provider: null, key: null, model: candidates[0].model };
   }
 
-  // اگه judge مشخص شده، ازش بپرس کدوم بهتره
   if (judgeModelId) {
     const judgeReq = {
       messages: [
@@ -866,33 +1022,19 @@ async function runFusion(env, combo, req, models) {
       const apiKey = key?.apiKey || keyFromEnvForProvider(env, provider);
       const r = await callProvider({ provider, apiKey, model: judgeModelId.modelName, req: judgeReq });
       const judged = await convertNonStreamToOpenAI({ upstream: r.upstream, kind: r.kind, model: judgeModelId.modelName });
-      return { result: { upstream: new Response(JSON.stringify(judged), { status: 200, headers: { 'Content-Type': 'application/json' } }), kind: 'openai' }, provider, key, model: 'fusion-judge' };
-    } catch {
-      // اگه judge fail شد، اولین کاندید رو بده
-    }
+      return {
+        result: {
+          upstream: new Response(JSON.stringify(judged), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+          kind: 'openai',
+        },
+        provider, key, model: 'fusion-judge',
+      };
+    } catch { /* fall through to longest answer */ }
   }
 
-  // بدون judge: بلندترین جواب رو بده
   candidates.sort((a, b) => b.text.length - a.text.length);
   const best = candidates[0];
-  return {
-    result: {
-      upstream: new Response(
-        JSON.stringify({
-          id: uid('chatcmpl'),
-          object: 'chat.completion',
-          created: Math.floor(now() / 1000),
-          model: best.model,
-          choices: [{ index: 0, message: { role: 'assistant', content: best.text }, finish_reason: 'stop' }],
-        }),
-        { status: 200, headers: { 'Content-Type': 'application/json' } }
-      ),
-      kind: 'openai',
-    },
-    provider: null,
-    key: null,
-    model: best.model,
-  };
+  return { result: wrap(best.text, best.model), provider: null, key: null, model: best.model };
 }
 
 function keyFromEnvForProvider(env, provider) {
@@ -1086,17 +1228,23 @@ async function handleComboEndpoint(req, env, comboId, subPath) {
     await epKeyTouch(env, rec.keyHash);
   }
 
-  // فقط chat/completions رو فعلاً پشتیبانی میکنیم
+  // Only chat/completions is supported for now
   if (!subPath.endsWith('/chat/completions')) {
     if (subPath.endsWith('/models')) {
-      return json({
-        object: 'list',
-        data: (combo.models || []).map((m, i) => ({
-          id: m.modelName || `model-${i}`,
-          object: 'model',
-          owned_by: m.providerId || 'combo',
-        })),
-      }, 200, CORS);
+      const allModels = [
+        ...(combo.models || []),
+        ...(combo.vision?.models || []),
+        ...(combo.audio?.models || []),
+      ];
+      const seen = new Set();
+      const data = [];
+      for (const m of allModels) {
+        const id = m.modelName || `model-${data.length}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        data.push({ id, object: 'model', owned_by: m.providerId || 'combo' });
+      }
+      return json({ object: 'list', data }, 200, CORS);
     }
     return json({ error: { message: `Unsupported endpoint: ${subPath}` } }, 404, CORS);
   }
@@ -1104,10 +1252,29 @@ async function handleComboEndpoint(req, env, comboId, subPath) {
   const body = await req.json().catch(() => ({}));
   const internal = normalizeIncomingOpenAI(body);
 
+  // NEW: detect input type & route to the right pool
+  const inputType = detectInputType(internal.messages);
+  const activePool = pickPoolForInputType(combo, inputType);
+
   try {
-    const { result } = await runCombo(env, combo, internal);
+    const { result } = await runCombo(env, activePool, internal);
 
     if (internal.stream) {
+      const ct = result.upstream.headers.get('content-type') || '';
+      if (ct.includes('application/json')) {
+        // fusion or already-wrapped result → convert to SSE
+        const data = await result.upstream.json();
+        const stream = jsonToSse(data);
+        return new Response(stream, {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            Connection: 'keep-alive',
+            ...CORS,
+          },
+        });
+      }
       const stream = sseTransform(result.upstream, result.kind, internal.model || 'combo');
       return new Response(stream, {
         status: 200,
@@ -1136,7 +1303,7 @@ async function handleComboEndpoint(req, env, comboId, subPath) {
 }
 
 /* ============================================================
-   LEGACY ROUTES (phase 1+2) — همانهایی که قبلاً بود
+   LEGACY ROUTES (phase 1+2)
    ============================================================ */
 
 function geminiContents(input) {
@@ -1400,6 +1567,7 @@ function handleConfigStatus(env) {
       hasOpenRouterKey: has('OPENROUTER_API_KEY'),
       hasXAIKey: has('XAI_API_KEY'),
       hasMistralKey: has('MISTRAL_API_KEY'),
+      hasTogetherKey: has('TOGETHER_API_KEY'),
     },
     200,
     CORS
@@ -1407,7 +1575,7 @@ function handleConfigStatus(env) {
 }
 
 /* ============================================================
-   TELEGRAM (phase 2) — بدون تغییر
+   TELEGRAM (phase 2)
    ============================================================ */
 
 const TG_DEFAULTS = {
