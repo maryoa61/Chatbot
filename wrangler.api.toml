@@ -1,8 +1,8 @@
 # Chatbot API backend worker (phase 1: stateless routes).
-# Deployed as "chatbot-api" on the same (second) Cloudflare account.
+# Deployed as "t-api" on the same (second) Cloudflare account.
 # Server keys are Worker Secrets, e.g.:
 #   wrangler secret put GEMINI_API_KEY --config wrangler.api.toml
-name = "chatbot-api"
+name = "t-api"
 main = "api.js"
 compatibility_date = "2024-01-01"
 
