@@ -40,19 +40,20 @@ import { Menu } from 'lucide-react';
 /* ============================================================
    Lazy-loaded heavy modals (only downloaded on first open)
    ============================================================ */
+// ✅ اصلاح: حذف (m as any) تا TypeScript نوع پراپ‌ها را بشناسد
 const AgentModal = lazy(() =>
   import('./components/AgentModal').then((m) => ({
-    default: (m as any).AgentModal || (m as any).default,
+    default: m.AgentModal,
   }))
 );
 const AgentInfoDrawer = lazy(() =>
   import('./components/AgentInfoDrawer').then((m) => ({
-    default: (m as any).AgentInfoDrawer || (m as any).default,
+    default: m.AgentInfoDrawer,
   }))
 );
 const SettingsModal = lazy(() =>
   import('./components/SettingsModal').then((m) => ({
-    default: (m as any).SettingsModal || (m as any).default,
+    default: m.SettingsModal,
   }))
 );
 
@@ -485,7 +486,7 @@ export default function App() {
             onClose={() => setIsSettingsModalOpen(false)}
             initialTab={settingsModalTab}
             agents={agents}
-            onEditAgent={(agent) => openAgentModalFromSettings(agent)}
+            onEditAgent={(agent: AIAgent) => openAgentModalFromSettings(agent)}
             onAddNewAgent={() => openAgentModalFromSettings(null)}
             themeSettings={themeSettings}
             onUpdateThemeSettings={handleUpdateThemeSettings}
