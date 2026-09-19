@@ -3,7 +3,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, {
+  useState,
+  useEffect,
+  useMemo,
+  useCallback,
+  lazy,
+  Suspense,
+} from 'react';
 import { AIAgent, Attachment, ChatMessage, TelegramBotConfig, ThemeSettings } from './types';
 import { PRESET_AGENTS } from './data/presetAgents';
 import {
@@ -28,21 +35,40 @@ import { Sidebar } from './components/Sidebar';
 import { ChatHeader } from './components/ChatHeader';
 import { ChatMessages } from './components/ChatMessages';
 import { ChatInput } from './components/ChatInput';
-import { AgentModal } from './components/AgentModal';
-import { AgentInfoDrawer } from './components/AgentInfoDrawer';
-import { SettingsModal } from './components/SettingsModal';
 import { Menu } from 'lucide-react';
 
+/* ============================================================
+   Lazy-loaded heavy modals (only downloaded on first open)
+   ============================================================ */
+const AgentModal = lazy(() =>
+  import('./components/AgentModal').then((m) => ({
+    default: (m as any).AgentModal || (m as any).default,
+  }))
+);
+const AgentInfoDrawer = lazy(() =>
+  import('./components/AgentInfoDrawer').then((m) => ({
+    default: (m as any).AgentInfoDrawer || (m as any).default,
+  }))
+);
+const SettingsModal = lazy(() =>
+  import('./components/SettingsModal').then((m) => ({
+    default: (m as any).SettingsModal || (m as any).default,
+  }))
+);
+
+type SettingsTab = 'telegram' | 'theme' | 'agents';
+
 export default function App() {
-  // 1. State for Theme Settings (Dark, Light, Midnight, Desert, Accents, Wallpaper, Font Size)
-  const [themeSettings, setThemeSettings] = useState<ThemeSettings>(() => loadSavedThemeSettings());
+  // ============================================================
+  // Theme
+  // ============================================================
+  const [themeSettings, setThemeSettings] = useState<ThemeSettings>(() =>
+    loadSavedThemeSettings()
+  );
   const theme = themeSettings.theme === 'light' ? 'light' : 'dark';
 
   useEffect(() => {
-    // Remove previous theme classes
     document.documentElement.classList.remove('light', 'dark', 'midnight', 'desert');
-
-    // Add active theme class
     document.documentElement.classList.add(themeSettings.theme);
     if (themeSettings.theme === 'light') {
       document.documentElement.classList.add('light');
@@ -51,26 +77,29 @@ export default function App() {
       document.documentElement.classList.add('dark');
       document.documentElement.classList.remove('light');
     }
-
     saveThemeSettingsToStorage(themeSettings);
     saveThemeToStorage(themeSettings.theme === 'light' ? 'light' : 'dark');
   }, [themeSettings]);
 
-  const toggleTheme = () => {
+  const toggleTheme = useCallback(() => {
     setThemeSettings((prev) => ({
       ...prev,
       theme: prev.theme === 'light' ? 'dark' : 'light',
     }));
-  };
+  }, []);
 
-  const handleUpdateThemeSettings = (newSettings: ThemeSettings) => {
+  const handleUpdateThemeSettings = useCallback((newSettings: ThemeSettings) => {
     setThemeSettings(newSettings);
-  };
+  }, []);
 
-  // 2. Telegram Bot Configuration State
-  const [telegramConfig, setTelegramConfig] = useState<TelegramBotConfig>(() => loadSavedTelegramConfig());
+  // ============================================================
+  // Telegram Bot Configuration
+  // ============================================================
+  const [telegramConfig, setTelegramConfig] = useState<TelegramBotConfig>(() =>
+    loadSavedTelegramConfig()
+  );
 
-  const handleUpdateTelegramConfig = async (newConfig: TelegramBotConfig) => {
+  const handleUpdateTelegramConfig = useCallback(async (newConfig: TelegramBotConfig) => {
     setTelegramConfig(newConfig);
     saveTelegramConfigToStorage(newConfig);
     try {
@@ -78,18 +107,11 @@ export default function App() {
     } catch (err) {
       console.error('Failed to sync telegram config to server:', err);
     }
-  };
+  }, []);
 
-  // 3. Settings Modal State (Telegram, Theme, Agents)
-  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
-  const [settingsModalTab, setSettingsModalTab] = useState<'telegram' | 'theme' | 'agents'>('telegram');
-
-  const openSettingsModal = (tab: 'telegram' | 'theme' | 'agents' = 'telegram') => {
-    setSettingsModalTab(tab);
-    setIsSettingsModalOpen(true);
-  };
-
-  // 4. Server Key Status (Runtime Environment)
+  // ============================================================
+  // Server Key Status
+  // ============================================================
   const [serverKeyStatus, setServerKeyStatus] = useState<ServerKeyStatus>({
     hasGeminiKey: false,
     hasOpenAIKey: false,
@@ -100,134 +122,212 @@ export default function App() {
     getServerKeyStatus().then(setServerKeyStatus);
   }, []);
 
-  // 3. State for Agents
+  // ============================================================
+  // Agents & Chats
+  // ============================================================
   const [agents, setAgents] = useState<AIAgent[]>(() => loadSavedAgents(PRESET_AGENTS));
   const [activeAgentId, setActiveAgentId] = useState<string>(() =>
     loadActiveAgentId(PRESET_AGENTS[0]?.id || 'gemini-pro')
   );
-
-  // 4. State for Chats (Real User & AI Messages only)
   const [chats, setChats] = useState<Record<string, ChatMessage[]>>(() => loadSavedChats());
 
-  // 5. UI states
+  // ============================================================
+  // UI States
+  // ============================================================
   const [isTyping, setIsTyping] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   const [isChatSearchOpen, setIsChatSearchOpen] = useState(true);
+
+  // AgentModal
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [agentToEdit, setAgentToEdit] = useState<AIAgent | null>(null);
+  /**
+   * Tracks whether AgentModal was opened FROM Settings.
+   * If true, closing AgentModal re-opens Settings on the "agents" tab.
+   */
+  const [agentModalFromSettings, setAgentModalFromSettings] = useState(false);
+
+  // Drawer & Mobile sidebar
   const [isInfoDrawerOpen, setIsInfoDrawerOpen] = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
 
-  // Active agent reference
-  const activeAgent = agents.find((a) => a.id === activeAgentId) || agents[0];
+  // SettingsModal
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+  const [settingsModalTab, setSettingsModalTab] = useState<SettingsTab>('telegram');
 
-  // Check if agent is ready to call (has user key, server environment key, or local endpoint)
-  const isAgentReady = (agent?: AIAgent | null) => {
-    if (!agent) return false;
-    if (agent.apiKey && agent.apiKey.trim().length > 0) return true;
-    if (
-      agent.baseUrl &&
-      (agent.baseUrl.includes('localhost') || agent.baseUrl.includes('127.0.0.1') || agent.baseUrl.includes(':11434'))
-    ) {
-      return true;
-    }
-    if (agent.provider === 'gemini' && serverKeyStatus.hasGeminiKey) return true;
-    if (agent.provider === 'openai' && serverKeyStatus.hasOpenAIKey && agent.baseUrl.includes('openai.com')) return true;
-    if (agent.provider === 'anthropic' && serverKeyStatus.hasAnthropicKey) return true;
-    return false;
-  };
+  // ============================================================
+  // Derived values (memoized)
+  // ============================================================
+  const activeAgent = useMemo(
+    () => agents.find((a) => a.id === activeAgentId) || agents[0],
+    [agents, activeAgentId]
+  );
 
-  // Active chat messages
-  const activeMessages = activeAgent ? chats[activeAgent.id] || [] : [];
+  const activeMessages = useMemo(
+    () => (activeAgent ? chats[activeAgent.id] || [] : []),
+    [activeAgent, chats]
+  );
 
-  // Persist agents when changed
+  const isAgentReady = useCallback(
+    (agent?: AIAgent | null) => {
+      if (!agent) return false;
+      if (agent.apiKey && agent.apiKey.trim().length > 0) return true;
+      if (
+        agent.baseUrl &&
+        (agent.baseUrl.includes('localhost') ||
+          agent.baseUrl.includes('127.0.0.1') ||
+          agent.baseUrl.includes(':11434'))
+      ) {
+        return true;
+      }
+      if (agent.provider === 'gemini' && serverKeyStatus.hasGeminiKey) return true;
+      if (
+        agent.provider === 'openai' &&
+        serverKeyStatus.hasOpenAIKey &&
+        agent.baseUrl.includes('openai.com')
+      )
+        return true;
+      if (agent.provider === 'anthropic' && serverKeyStatus.hasAnthropicKey) return true;
+      return false;
+    },
+    [serverKeyStatus]
+  );
+
+  // ============================================================
+  // Persist effects
+  // ============================================================
   useEffect(() => {
     saveAgentsToStorage(agents);
   }, [agents]);
 
-  // Persist activeAgentId
   useEffect(() => {
     saveActiveAgentId(activeAgentId);
   }, [activeAgentId]);
 
-  // Send message handler
-  const handleSendMessage = async (text: string, attachments: Attachment[] = []) => {
-    if (!activeAgent) return;
+  // ============================================================
+  // Modal openers
+  // ============================================================
+  const openSettingsModal = useCallback((tab: SettingsTab = 'telegram') => {
+    setSettingsModalTab(tab);
+    setIsSettingsModalOpen(true);
+  }, []);
 
-    // Verify if API Key / Endpoint is ready
-    if (!isAgentReady(activeAgent)) {
-      setAgentToEdit(activeAgent);
-      setIsModalOpen(true);
-      return;
+  /** Open AgentModal from the main UI (NOT settings) */
+  const openAgentModalFromMain = useCallback((agent: AIAgent | null) => {
+    setAgentModalFromSettings(false);
+    setAgentToEdit(agent);
+    setIsModalOpen(true);
+  }, []);
+
+  /** Open AgentModal from Settings — remember to go back on close */
+  const openAgentModalFromSettings = useCallback((agent: AIAgent | null) => {
+    setAgentModalFromSettings(true);
+    setIsSettingsModalOpen(false);
+    setAgentToEdit(agent);
+    setIsModalOpen(true);
+  }, []);
+
+  /** Unified close handler for AgentModal */
+  const closeAgentModal = useCallback(() => {
+    setIsModalOpen(false);
+    setAgentToEdit(null);
+    if (agentModalFromSettings) {
+      setAgentModalFromSettings(false);
+      setSettingsModalTab('agents');
+      setIsSettingsModalOpen(true);
     }
+  }, [agentModalFromSettings]);
 
-    const userMessage: ChatMessage = {
-      id: `msg-${Date.now()}-user`,
-      role: 'user',
-      content: text,
-      timestamp: Date.now(),
-      agentId: activeAgent.id,
-      attachments,
-      status: 'sent',
-    };
+  // ============================================================
+  // Chat
+  // ============================================================
+  const handleSendMessage = useCallback(
+    async (text: string, attachments: Attachment[] = []) => {
+      if (!activeAgent) return;
 
-    const updatedWithUser = [...activeMessages, userMessage];
-    const newChats = { ...chats, [activeAgent.id]: updatedWithUser };
-    setChats(newChats);
-    saveChatsToStorage(newChats);
+      if (!isAgentReady(activeAgent)) {
+        openAgentModalFromMain(activeAgent);
+        return;
+      }
 
-    setIsTyping(true);
-    if (webSearchEnabled) {
-      setIsSearching(true);
-    }
-
-    try {
-      const result = await sendChatMessage({
-        agent: activeAgent,
-        messages: updatedWithUser,
-        newUserMessage: text,
-        attachments,
-        enableWebSearch: webSearchEnabled,
-      });
-
-      const assistantMessage: ChatMessage = {
-        id: `msg-${Date.now()}-ai`,
-        role: 'assistant',
-        content: result.reply,
+      const userMessage: ChatMessage = {
+        id: `msg-${Date.now()}-user`,
+        role: 'user',
+        content: text,
         timestamp: Date.now(),
         agentId: activeAgent.id,
-        webSources: result.webSources,
+        attachments,
         status: 'sent',
       };
 
-      const finalMessages = [...updatedWithUser, assistantMessage];
-      const finalChats = { ...chats, [activeAgent.id]: finalMessages };
-      setChats(finalChats);
-      saveChatsToStorage(finalChats);
-    } catch (err: any) {
-      console.error('Chat error:', err);
-      const errorMessage: ChatMessage = {
-        id: `msg-${Date.now()}-err`,
-        role: 'assistant',
-        content: `⚠️ **خطا در دریافت پاسخ:**\n${err.message || 'ارتباط با API یا سرور با خطا مواجه شد.'}\n\nلطفاً کلید API و آدرس Base URL را بررسی فرمایید.`,
-        timestamp: Date.now(),
-        agentId: activeAgent.id,
-        error: err.message,
-      };
+      const updatedWithUser = [...activeMessages, userMessage];
+      const newChats = { ...chats, [activeAgent.id]: updatedWithUser };
+      setChats(newChats);
+      saveChatsToStorage(newChats);
 
-      const finalMessages = [...updatedWithUser, errorMessage];
-      const finalChats = { ...chats, [activeAgent.id]: finalMessages };
-      setChats(finalChats);
-      saveChatsToStorage(finalChats);
-    } finally {
-      setIsTyping(false);
-      setIsSearching(false);
-    }
-  };
+      setIsTyping(true);
+      if (webSearchEnabled) setIsSearching(true);
 
-  // Save or update an agent
-  const handleSaveAgent = (savedAgent: AIAgent) => {
+      try {
+        const result = await sendChatMessage({
+          agent: activeAgent,
+          messages: updatedWithUser,
+          newUserMessage: text,
+          attachments,
+          enableWebSearch: webSearchEnabled,
+        });
+
+        const assistantMessage: ChatMessage = {
+          id: `msg-${Date.now()}-ai`,
+          role: 'assistant',
+          content: result.reply,
+          timestamp: Date.now(),
+          agentId: activeAgent.id,
+          webSources: result.webSources,
+          status: 'sent',
+        };
+
+        const finalMessages = [...updatedWithUser, assistantMessage];
+        const finalChats = { ...chats, [activeAgent.id]: finalMessages };
+        setChats(finalChats);
+        saveChatsToStorage(finalChats);
+      } catch (err: any) {
+        console.error('Chat error:', err);
+        const errorMessage: ChatMessage = {
+          id: `msg-${Date.now()}-err`,
+          role: 'assistant',
+          content: `⚠️ **خطا در دریافت پاسخ:**\n${
+            err.message || 'ارتباط با API یا سرور با خطا مواجه شد.'
+          }\n\nلطفاً کلید API و آدرس Base URL را بررسی فرمایید.`,
+          timestamp: Date.now(),
+          agentId: activeAgent.id,
+          error: err.message,
+        };
+
+        const finalMessages = [...updatedWithUser, errorMessage];
+        const finalChats = { ...chats, [activeAgent.id]: finalMessages };
+        setChats(finalChats);
+        saveChatsToStorage(finalChats);
+      } finally {
+        setIsTyping(false);
+        setIsSearching(false);
+      }
+    },
+    [
+      activeAgent,
+      activeMessages,
+      chats,
+      webSearchEnabled,
+      isAgentReady,
+      openAgentModalFromMain,
+    ]
+  );
+
+  // ============================================================
+  // Agent CRUD
+  // ============================================================
+  const handleSaveAgent = useCallback((savedAgent: AIAgent) => {
     setAgents((prev) => {
       const exists = prev.some((a) => a.id === savedAgent.id);
       if (exists) {
@@ -236,31 +336,32 @@ export default function App() {
       return [savedAgent, ...prev];
     });
     setActiveAgentId(savedAgent.id);
-  };
+  }, []);
 
-  // Delete an agent
-  const handleDeleteAgent = (agentId: string) => {
-    if (confirm('آیا از حذف این عامل هوش مصنوعی اطمینان دارید؟')) {
+  const handleDeleteAgent = useCallback(
+    (agentId: string) => {
+      if (!confirm('آیا از حذف این عامل هوش مصنوعی اطمینان دارید؟')) return;
       setAgents((prev) => prev.filter((a) => a.id !== agentId));
       if (activeAgentId === agentId) {
         const remaining = agents.filter((a) => a.id !== agentId);
-        if (remaining.length > 0) {
-          setActiveAgentId(remaining[0].id);
-        }
+        if (remaining.length > 0) setActiveAgentId(remaining[0].id);
       }
-    }
-  };
+    },
+    [activeAgentId, agents]
+  );
 
-  // Clear chat history for active agent
-  const handleClearChat = () => {
+  const handleClearChat = useCallback(() => {
     if (!activeAgent) return;
     if (confirm(`آیا تاریخچه پیام‌های گفتگو با "${activeAgent.name}" پاک شود؟`)) {
       const updated = { ...chats, [activeAgent.id]: [] };
       setChats(updated);
       saveChatsToStorage(updated);
     }
-  };
+  }, [activeAgent, chats]);
 
+  // ============================================================
+  // Render
+  // ============================================================
   return (
     <div
       id="telegram-app-root"
@@ -269,7 +370,7 @@ export default function App() {
       }`}
       dir="rtl"
     >
-      {/* Mobile Top Header Toggle (visible on small screens) */}
+      {/* Mobile menu toggle */}
       <div className="md:hidden fixed top-3 left-3 z-30">
         <button
           onClick={() => setIsMobileSidebarOpen(!isMobileSidebarOpen)}
@@ -284,19 +385,12 @@ export default function App() {
         </button>
       </div>
 
-      {/* Telegram Sidebar (Chat & Agent List) */}
       <Sidebar
         agents={agents}
         activeAgentId={activeAgentId}
-        onSelectAgent={(id) => setActiveAgentId(id)}
-        onAddNewAgent={() => {
-          setAgentToEdit(null);
-          setIsModalOpen(true);
-        }}
-        onEditAgent={(agent) => {
-          setAgentToEdit(agent);
-          setIsModalOpen(true);
-        }}
+        onSelectAgent={setActiveAgentId}
+        onAddNewAgent={() => openAgentModalFromMain(null)}
+        onEditAgent={(agent) => openAgentModalFromMain(agent)}
         onDeleteAgent={handleDeleteAgent}
         chats={chats}
         isOpenMobile={isMobileSidebarOpen}
@@ -309,21 +403,16 @@ export default function App() {
         themeSettings={themeSettings}
       />
 
-      {/* Main Telegram Chat Window */}
       <main className="flex-1 flex flex-col h-full overflow-hidden relative">
         {activeAgent ? (
           <>
-            {/* Telegram Header */}
             <ChatHeader
               agent={activeAgent}
               isSearching={isSearching}
               isTyping={isTyping}
               webSearchEnabled={webSearchEnabled}
               onToggleWebSearch={() => setWebSearchEnabled(!webSearchEnabled)}
-              onOpenSettings={() => {
-                setAgentToEdit(activeAgent);
-                setIsModalOpen(true);
-              }}
+              onOpenSettings={() => openAgentModalFromMain(activeAgent)}
               onToggleInfo={() => setIsInfoDrawerOpen(!isInfoDrawerOpen)}
               onClearChat={handleClearChat}
               theme={theme}
@@ -334,17 +423,13 @@ export default function App() {
               telegramConfig={telegramConfig}
             />
 
-            {/* Chat Messages Stream */}
             <ChatMessages
               messages={activeMessages}
               agent={activeAgent}
               isTyping={isTyping}
               isSearching={isSearching}
               onSendPresetPrompt={(prompt) => handleSendMessage(prompt)}
-              onOpenSettings={() => {
-                setAgentToEdit(activeAgent);
-                setIsModalOpen(true);
-              }}
+              onOpenSettings={() => openAgentModalFromMain(activeAgent)}
               theme={theme}
               themeSettings={themeSettings}
               isSearchOpen={isChatSearchOpen}
@@ -353,7 +438,6 @@ export default function App() {
               isAgentReady={isAgentReady(activeAgent)}
             />
 
-            {/* Bottom Message Composer */}
             <ChatInput
               onSendMessage={handleSendMessage}
               disabled={isTyping || isSearching}
@@ -369,56 +453,48 @@ export default function App() {
         )}
       </main>
 
-      {/* Agent Info Drawer (Telegram Right Sidebar) */}
-      {activeAgent && (
-        <AgentInfoDrawer
-          agent={activeAgent}
-          isOpen={isInfoDrawerOpen}
-          onClose={() => setIsInfoDrawerOpen(false)}
-          onEditAgent={() => {
-            setAgentToEdit(activeAgent);
-            setIsModalOpen(true);
-          }}
-          onClearHistory={handleClearChat}
-          theme={theme}
-        />
-      )}
+      <Suspense fallback={null}>
+        {/* Agent Info Drawer */}
+        {activeAgent && isInfoDrawerOpen && (
+          <AgentInfoDrawer
+            agent={activeAgent}
+            isOpen={isInfoDrawerOpen}
+            onClose={() => setIsInfoDrawerOpen(false)}
+            onEditAgent={() => openAgentModalFromMain(activeAgent)}
+            onClearHistory={handleClearChat}
+            theme={theme}
+          />
+        )}
 
-      {/* Modal to Register / Edit Agent */}
-      <AgentModal
-        isOpen={isModalOpen}
-        onClose={() => {
-          setIsModalOpen(false);
-          setAgentToEdit(null);
-        }}
-        onSave={handleSaveAgent}
-        agentToEdit={agentToEdit}
-        theme={theme}
-        serverKeyStatus={serverKeyStatus}
-      />
+        {/* Agent Modal (add / edit) */}
+        {isModalOpen && (
+          <AgentModal
+            isOpen={isModalOpen}
+            onClose={closeAgentModal}
+            onSave={handleSaveAgent}
+            agentToEdit={agentToEdit}
+            theme={theme}
+            serverKeyStatus={serverKeyStatus}
+          />
+        )}
 
-      {/* General Settings Modal (Telegram Bot, Themes & Customization, AI Agents) */}
-      <SettingsModal
-        isOpen={isSettingsModalOpen}
-        onClose={() => setIsSettingsModalOpen(false)}
-        initialTab={settingsModalTab}
-        agents={agents}
-        onEditAgent={(agent) => {
-          setIsSettingsModalOpen(false);
-          setAgentToEdit(agent);
-          setIsModalOpen(true);
-        }}
-        onAddNewAgent={() => {
-          setIsSettingsModalOpen(false);
-          setAgentToEdit(null);
-          setIsModalOpen(true);
-        }}
-        themeSettings={themeSettings}
-        onUpdateThemeSettings={handleUpdateThemeSettings}
-        telegramConfig={telegramConfig}
-        onUpdateTelegramConfig={handleUpdateTelegramConfig}
-        serverKeyStatus={serverKeyStatus}
-      />
+        {/* Settings Modal */}
+        {isSettingsModalOpen && (
+          <SettingsModal
+            isOpen={isSettingsModalOpen}
+            onClose={() => setIsSettingsModalOpen(false)}
+            initialTab={settingsModalTab}
+            agents={agents}
+            onEditAgent={(agent) => openAgentModalFromSettings(agent)}
+            onAddNewAgent={() => openAgentModalFromSettings(null)}
+            themeSettings={themeSettings}
+            onUpdateThemeSettings={handleUpdateThemeSettings}
+            telegramConfig={telegramConfig}
+            onUpdateTelegramConfig={handleUpdateTelegramConfig}
+            serverKeyStatus={serverKeyStatus}
+          />
+        )}
+      </Suspense>
     </div>
   );
 }
